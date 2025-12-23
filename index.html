@@ -5,54 +5,11 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
   <title>マイ・ゲメ</title>
   <style>
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: #111;
-      color: #fff;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      overscroll-behavior: none;
-    }
-    .wrap {
-      min-height: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      padding: 10px;
-      box-sizing: border-box;
-    }
-    .hud, .hint {
-      width: 100%;
-      max-width: 900px;
-      margin: 0 auto;
-      box-sizing: border-box;
-    }
-    .hud {
-      display: flex;
-      justify-content: space-between;
-      opacity: .9;
-      font-size: 16px;
-    }
-
-    /* ここが重要：aspect-ratio は使わない */
-    canvas {
-      display: block;
-      width: 92vw;
-      max-width: 900px;
-      height: auto;              /* 800x600 に追従 */
-      background: #0b0b0b;
-      border: 1px solid #333;
-      border-radius: 8px;
-      touch-action: none;
-    }
-
-    .hint {
-      opacity: .7;
-      font-size: 14px;
-      text-align: center;
-    }
+    html, body { margin:0; height:100%; background:#111; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; padding:10px; box-sizing:border-box; }
+    .hud { width:min(92vw, 900px); display:flex; justify-content:space-between; opacity:.9; }
+    canvas { background:#0b0b0b; border:1px solid #333; border-radius:12px; touch-action:none; width:min(92vw, 900px); height:auto; aspect-ratio:4/3; display:block; }
+    .hint { opacity:.65; font-size:14px; text-align:center; width:min(92vw, 900px); }
   </style>
 </head>
 <body>
@@ -62,7 +19,6 @@
       <div id="helpText">←→↑↓ / WASD / ドラッグ</div>
     </div>
 
-    <!-- 座標系は固定（論理サイズ） -->
     <canvas id="game" width="800" height="600"></canvas>
 
     <div class="hint">Game Over時：<b>R</b> または <b>画面タップ</b> でリスタート</div>
@@ -70,22 +26,34 @@
 
   <script>
     // =========================
+    // 固定のゲーム座標（ここを基準に全部計算）
+    // =========================
+    const GAME_W = 800;
+    const GAME_H = 600;
+
+    // =========================
     // 基本設定
     // =========================
     const canvas = document.getElementById("game");
     const ctx = canvas.getContext("2d");
     const scoreText = document.getElementById("scoreText");
 
-    const GAME_W = 800;
-    const GAME_H = 600;
-
     // DPR（スマホでぼやけ防止）
-    // ※「論理座標は800x600のまま」にするのがコツ
     function applyDPR() {
       const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+
+      // 表示サイズ：画面幅にフィット（CSS側でもやってるが念のため）
+      const cssW = Math.min(window.innerWidth * 0.92, 900);
+      const cssH = cssW * (GAME_H / GAME_W);
+      canvas.style.width = cssW + "px";
+      canvas.style.height = cssH + "px";
+
+      // 実ピクセル
       canvas.width  = Math.floor(GAME_W * dpr);
       canvas.height = Math.floor(GAME_H * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // 以降は800x600で描ける
+
+      // 以降は GAME_W x GAME_H 座標で描ける
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
     applyDPR();
     window.addEventListener("resize", applyDPR);
@@ -106,8 +74,19 @@
     let enemies = [];
     let enemyVels = [];
 
-    let score = 0;
+    // ---- 自動攻撃（弾） ----
+    let bullets = [];
+    let shootTimer = 0;
+
+    // 調整ポイント（ここだけ触ればOK）
+    const SHOOT_INTERVAL = 0.18; // 秒（小さいほど連射）
+    const BULLET_SPEED   = 700;  // px/sec
+    const BULLET_SIZE    = 10;
+
+    let score = 0;      // 時間スコア
+    let kills = 0;      // 撃破数
     let gameOver = false;
+
     let lastTime = performance.now();
 
     // =========================
@@ -116,6 +95,8 @@
     const keys = {};
     window.addEventListener("keydown", (e) => {
       keys[e.key.toLowerCase()] = true;
+
+      // リスタート
       if (gameOver && e.key.toLowerCase() === "r") restartGame();
     });
     window.addEventListener("keyup", (e) => {
@@ -148,25 +129,15 @@
 
     canvas.addEventListener("pointerdown", (e) => {
       canvas.setPointerCapture(e.pointerId);
-
-      // GameOverならタップで即リスタート
-      if (gameOver) {
-        restartGame();
-        return;
-      }
-
+      if (gameOver) { restartGame(); return; }
       dragging = true;
       movePlayerToPointer(e.clientX, e.clientY);
     });
-
     canvas.addEventListener("pointermove", (e) => {
       if (!dragging) return;
       movePlayerToPointer(e.clientX, e.clientY);
     });
-
-    canvas.addEventListener("pointerup", () => {
-      dragging = false;
-    });
+    canvas.addEventListener("pointerup", () => { dragging = false; });
 
     // =========================
     // 敵生成
@@ -177,16 +148,43 @@
 
       for (let i = 0; i < 3; i++) {
         enemies.push({
-          x: 100 + i * 220,
+          x: 120 + i * 220,
           y: 120 + i * 80,
           size: 40,
         });
 
         enemyVels.push({
-          x: 150 + i * 60,
+          x: 160 + i * 70,
           y: 120 + i * 40,
         });
       }
+    }
+
+    // =========================
+    // 自動攻撃（弾生成）
+    // =========================
+    function spawnBullet() {
+      // プレイヤー中心から「上に」撃つ（縦シュー）
+      const cx = player.x + player.size / 2;
+      const cy = player.y + player.size / 2;
+
+      bullets.push({
+        x: cx - BULLET_SIZE / 2,
+        y: cy - BULLET_SIZE / 2,
+        size: BULLET_SIZE,
+        vx: 0,
+        vy: -BULLET_SPEED,
+      });
+    }
+
+    // AABB当たり判定（四角同士）
+    function hitRect(a, b) {
+      return (
+        a.x < b.x + b.size &&
+        a.x + a.size > b.x &&
+        a.y < b.y + b.size &&
+        a.y + a.size > b.y
+      );
     }
 
     function restartGame() {
@@ -194,7 +192,11 @@
       player.y = playerStart.y;
 
       score = 0;
+      kills = 0;
       gameOver = false;
+
+      bullets = [];
+      shootTimer = 0;
 
       createEnemies();
       lastTime = performance.now();
@@ -209,7 +211,6 @@
 
       // スコア：時間で増える（1秒=100点）
       score += dt * 100;
-      scoreText.textContent = "Score: " + Math.floor(score);
 
       // プレイヤー移動
       const speed = player.speed;
@@ -219,12 +220,26 @@
       if (keys["arrowdown"] || keys["s"])  player.y += speed * dt;
       clampPlayer();
 
-      // 敵移動
+      // ---- 自動発射 ----
+      shootTimer += dt;
+      while (shootTimer >= SHOOT_INTERVAL) {
+        shootTimer -= SHOOT_INTERVAL;
+        spawnBullet();
+      }
+
+      // 弾移動
+      bullets.forEach((b) => {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+      });
+      // 画面外の弾は消す
+      bullets = bullets.filter((b) => b.y + b.size > 0 && b.y < GAME_H && b.x + b.size > 0 && b.x < GAME_W);
+
+      // 敵移動（反射）
       enemies.forEach((e, i) => {
         e.x += enemyVels[i].x * dt;
         e.y += enemyVels[i].y * dt;
 
-        // 反射
         if (e.x < 0) { e.x = 0; enemyVels[i].x *= -1; }
         if (e.x > GAME_W - e.size) { e.x = GAME_W - e.size; enemyVels[i].x *= -1; }
 
@@ -232,19 +247,49 @@
         if (e.y > GAME_H - e.size) { e.y = GAME_H - e.size; enemyVels[i].y *= -1; }
       });
 
-      // 当たり判定
-      for (const e of enemies) {
-        const hit =
-          player.x < e.x + e.size &&
-          player.x + player.size > e.x &&
-          player.y < e.y + e.size &&
-          player.y + player.size > e.y;
+      // ---- 弾 vs 敵（撃破）----
+      for (let bi = bullets.length - 1; bi >= 0; bi--) {
+        const b = bullets[bi];
 
-        if (hit) {
+        for (let ei = enemies.length - 1; ei >= 0; ei--) {
+          const e = enemies[ei];
+
+          if (hitRect(b, e)) {
+            // 弾消す
+            bullets.splice(bi, 1);
+
+            // 敵消して撃破数+1
+            enemies.splice(ei, 1);
+            enemyVels.splice(ei, 1);
+            kills++;
+
+            // 敵を倒したらスコア加算（お好み）
+            score += 250;
+
+            // 敵が減りすぎると寂しいので、1体補充（お好み）
+            const nx = Math.random() * (GAME_W - 40);
+            const ny = Math.random() * (GAME_H - 40);
+            enemies.push({ x: nx, y: ny, size: 40 });
+            enemyVels.push({
+              x: (Math.random() < 0.5 ? -1 : 1) * (200 + Math.random() * 200),
+              y: (Math.random() < 0.5 ? -1 : 1) * (120 + Math.random() * 180),
+            });
+
+            break;
+          }
+        }
+      }
+
+      // プレイヤー vs 敵（ゲームオーバー）
+      for (const e of enemies) {
+        if (hitRect(player, e)) {
           gameOver = true;
           break;
         }
       }
+
+      // 表示（時間スコア＋撃破数）
+      scoreText.textContent = "Score: " + Math.floor(score) + "  /  Kills: " + kills;
     }
 
     // =========================
@@ -257,11 +302,17 @@
       ctx.fillStyle = "#0b0b0b";
       ctx.fillRect(0, 0, GAME_W, GAME_H);
 
-      // プレイヤー
+      // 弾（青っぽく）
+      ctx.fillStyle = "#3af";
+      bullets.forEach(b => {
+        ctx.fillRect(b.x, b.y, b.size, b.size);
+      });
+
+      // プレイヤー（白）
       ctx.fillStyle = "#ddd";
       ctx.fillRect(player.x, player.y, player.size, player.size);
 
-      // 敵
+      // 敵（赤）
       ctx.fillStyle = "#e11";
       enemies.forEach(e => {
         ctx.fillRect(e.x, e.y, e.size, e.size);
