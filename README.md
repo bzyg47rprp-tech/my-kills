@@ -1,2 +1,0 @@
-# my-kills
-my games
